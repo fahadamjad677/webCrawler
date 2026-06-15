@@ -8,6 +8,12 @@
  *
  * Uses a temp file + rename for atomic write — no half-written file.
  */
+
+int   save_visited(const VisitedSet *v, const char *path);
+int   load_visited(VisitedSet *v, URLQueue *q, const char *path);
+void  build_data_paths(CrawlerState *cs, const char *seed_url);
+
+
 int save_visited(const VisitedSet *v, const char *path) {
     /* write to a temp file first */
     char tmp_path[512];

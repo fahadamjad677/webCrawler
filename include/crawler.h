@@ -14,10 +14,11 @@
 #define MAX_URL_LEN     512
 #define MAX_LINKS       50      /* max links extracted per page    */
 #define THREAD_COUNT    4
-#define SAVE_FILE       "data/visited.txt"
-#define LOG_FILE        "data/crawler.log"
+#define DATA_ROOT       "data"
 #define FETCH_DELAY_MS  500     /* polite crawl delay per thread   */
 #define QUEUE_CAPACITY  MAX_URLS
+#define MAX_PAGES       500     /* stop crawl after this many pages */
+#define PATH_LEN        (MAX_URL_LEN + 64)
 
 /* ─── URL queue (circular, bounded) ────────────────────────────── */
 typedef struct {
@@ -59,6 +60,10 @@ typedef struct {
     int             shutdown;        /* set to 1 to stop all threads  */
     ThreadStats     stats[THREAD_COUNT];
     FILE           *logfp;
+    char            seed_origin[MAX_URL_LEN]; /* scheme+host of first seed */
+    char            data_dir[PATH_LEN];       /* data/<site>          <-- ADD THIS LINE */
+    char            save_file[PATH_LEN];      /* data/<site>/visited.txt */
+    char            log_file[PATH_LEN];       /* data/<site>/crawler.log */
 } CrawlerState;
 
 /* ─── Function prototypes ────────────────────────────────────────── */
@@ -97,5 +102,8 @@ void *worker_thread(void *arg);
 
 /* stats.c */
 void  print_stats(const CrawlerState *cs);
+
+/* main.c (used by worker.c) */
+void launch_workers(CrawlerState *cs, pthread_t threads[]);
 
 #endif /* CRAWLER_H */

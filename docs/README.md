@@ -11,7 +11,7 @@ webcrawler/
 ├── include/
 │   └── crawler.h          # All types, constants, prototypes
 ├── src/
-│   ├── main.c             # Entry point, init, signal handling
+│   ├── main.c             # Entry point, init, path setup, signal handling
 │   ├── queue.c            # Circular bounded URL queue
 │   ├── visited.c          # Hash-table visited set (O(1) lookup)
 │   ├── fetcher.c          # libcurl HTTP fetcher
@@ -20,12 +20,19 @@ webcrawler/
 │   ├── logger.c           # Thread-safe timestamped logger
 │   ├── worker.c           # Worker thread logic
 │   └── stats.c            # Final statistics table
+├── obj/                    # Auto-created: compiled object files
 ├── data/
-│   ├── visited.txt        # Auto-created: persisted visited URLs
-│   └── crawler.log        # Auto-created: full run log
+│   └── <site-name>/        # Auto-created: one folder per crawled site
+│       ├── visited.txt    # Persisted visited URLs (resume)
+│       └── crawler.log    # Full run log
 └── docs/
     └── README.md
 ```
+
+Each crawl run derives a folder name from the seed URL's host (e.g.
+`https://example.com` → `data/example.com/`). All progress and logs for that
+site are stored under its own folder, so multiple sites can be crawled and
+resumed independently.
 
 ---
 
@@ -40,15 +47,28 @@ sudo apt install -y libcurl4-openssl-dev gcc make
 cd webcrawler
 make
 
-# Run with default seed URLs
+#If Data already Exists then 
+make clean
+make
+
+# Run with default seed URL
 ./crawler
 
-# Run with custom seed URLs
-./crawler https://example.com https://httpbin.org
+# Run with a custom seed URL (also sets the data/ subfolder name)
+./crawler https://example.com
 
-# Resume a previous crawl (just re-run — it loads data/visited.txt automatically)
-./crawler
+# Resume a previous crawl for the same site (just re-run with the same seed)
+./crawler https://example.com
 ```
+# some Test Cases
+
+./crawler https://httpbin.org
+./crawler https://info.cern.ch
+./crawler https://www.iana.org/help/example-domains
+./crawler https://neverssl.com
+
+> Note: the first argument's host determines the data folder, e.g.
+> `data/example.com/visited.txt` and `data/example.com/crawler.log`.
 
 ---
 
@@ -69,10 +89,10 @@ make
 ## How the Resume Works
 
 1. On every successful page fetch, `save_visited()` writes all visited
-   URLs to `data/visited.txt` using an atomic `write-to-tmp → rename`.
+   URLs to `data/<site-name>/visited.txt` using an atomic `write-to-tmp → rename`.
 2. On startup, `load_visited()` reads that file back into the hash table.
 3. Seed URLs that are already in the visited set are skipped.
-4. So restarting the crawler picks up exactly where it left off.
+4. So restarting the crawler with the same seed picks up exactly where it left off.
 5. Press **Ctrl+C** at any time — the signal handler saves state before exit.
 
 ---
@@ -80,14 +100,18 @@ make
 ## Sample Output
 
 ```
-[SYSTEM] Loading 'data/visited.txt'... 12 URLs found
+[SYSTEM] Domain filter : https://example.com
+[SYSTEM] Data dir      : data/example.com
+[SYSTEM] Page cap      : 500 pages
+
+[SYSTEM] No resume file found — starting fresh crawl
 [SYSTEM] Starting 4 worker threads
 
 [10:23:01][Thread A] Fetching  --> https://example.com  [queue: 1]
 [10:23:01][Thread B] Fetching  --> https://www.iana.org  [queue: 0]
 [10:23:02][Thread A] Done      <-- https://example.com  [3 links found]
 [10:23:02][Thread A] Queued    +++ 2 new links
-[10:23:02][Thread A] [SAVING] Progress saved to 'data/visited.txt'  (13 visited)
+[10:23:02][Thread A] [SAVING] Progress saved to 'data/example.com/visited.txt'  (13 visited)
 [10:23:03][Thread B] Done      <-- https://www.iana.org  [8 links found]
 ...
 
@@ -105,5 +129,14 @@ make
 ╚══════════╩══════════════╩═════════════╩══════════╝
 
   Total unique URLs visited: 18
-  Progress saved to: data/visited.txt
+  Progress saved to: data/example.com/visited.txt
 ```
+
+---
+
+## Build Artifacts
+
+- Compiled `.o` files go into `obj/`.
+- `make clean` removes `obj/`, the `crawler` binary, and the entire `data/`
+  directory (all per-site crawl progress and logs).
+

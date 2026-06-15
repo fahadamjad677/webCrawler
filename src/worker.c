@@ -6,21 +6,38 @@ typedef struct {
     int           thread_id;
 } WorkerArg;
 
+/* ─── Domain filter ───────────────────────────────────────────── */
+
 /*
- * worker_thread: the main crawl loop for each thread.
- *
- * Algorithm:
- *   1. Lock mutex
- *   2. Wait (cond_wait) until queue is non-empty OR shutdown flag set
- *   3. Pop a URL; mark active
- *   4. Unlock mutex (let other threads work in parallel)
- *   5. Fetch URL (network I/O — no lock held)
- *   6. Parse HTML for links
- *   7. Lock mutex again
- *   8. Mark URL visited, enqueue new links, save progress
- *   9. Signal other threads, unlock, sleep politely
- *  10. Repeat until queue empty AND no other thread is active
+ * get_origin: copy scheme+host from a URL into out.
+ * e.g. "https://example.com/foo/bar" -> "https://example.com"
  */
+static void get_origin(const char *url, char *out, size_t outlen) {
+    const char *sep = strstr(url, "://");
+    if (!sep) { strncpy(out, url, outlen - 1); out[outlen-1] = '\0'; return; }
+    sep += 3;
+    const char *slash = strchr(sep, '/');
+    size_t host_len = slash ? (size_t)(slash - url) : strlen(url);
+    size_t copy = host_len < outlen - 1 ? host_len : outlen - 1;
+    memcpy(out, url, copy);
+    out[copy] = '\0';
+}
+
+/*
+ * same_origin: returns 1 if `url` belongs to the same scheme+host
+ * as cs->seed_origin, 0 otherwise.
+ *
+ * This is the primary mechanism that keeps the crawl finite.
+ */
+static int same_origin(const CrawlerState *cs, const char *url) {
+    if (cs->seed_origin[0] == '\0') return 1; /* no filter — allow all */
+    char url_origin[MAX_URL_LEN];
+    get_origin(url, url_origin, sizeof(url_origin));
+    return strcmp(cs->seed_origin, url_origin) == 0;
+}
+
+/* ─── Worker thread ───────────────────────────────────────────── */
+
 void *worker_thread(void *arg) {
     WorkerArg    *wa = (WorkerArg *)arg;
     CrawlerState *cs = wa->cs;
@@ -34,11 +51,10 @@ void *worker_thread(void *arg) {
         pthread_mutex_lock(&cs->lock);
 
         while (queue_is_empty(&cs->queue) && !cs->shutdown) {
-            /* If queue is empty but other threads are still fetching,
-             * they might discover new URLs — so wait for a signal.
-             * If no threads are active either, we're done.             */
             if (cs->active_threads == 0) {
-                cs->shutdown = 1;   /* signal everyone else to stop    */
+                /* Queue empty, nobody fetching — crawl is complete. */
+                cs->shutdown = 1;
+                pthread_cond_broadcast(&cs->work_available);
                 break;
             }
             pthread_cond_wait(&cs->work_available, &cs->lock);
@@ -46,7 +62,7 @@ void *worker_thread(void *arg) {
 
         if (cs->shutdown && queue_is_empty(&cs->queue)) {
             pthread_mutex_unlock(&cs->lock);
-            pthread_cond_broadcast(&cs->work_available); /* wake sleeping threads */
+            pthread_cond_broadcast(&cs->work_available);
             break;
         }
 
@@ -56,8 +72,7 @@ void *worker_thread(void *arg) {
             continue;
         }
 
-        /* skip if already visited (could have been added twice before
-         * either thread processed it)                                  */
+        /* Skip if already visited (duplicate in queue) */
         if (visited_contains(&cs->visited, url)) {
             pthread_mutex_unlock(&cs->lock);
             continue;
@@ -88,15 +103,27 @@ void *worker_thread(void *arg) {
             log_msg(cs, id, "ERROR     --> %s  (curl code %d)", url, fetch_err);
             cs->stats[id].errors++;
         } else {
-            /* mark this URL as visited */
             visited_insert(&cs->visited, url);
             cs->stats[id].pages_fetched++;
 
             log_msg(cs, id, "Done      <-- %s  [%d links found]", url, link_count);
 
-            /* enqueue new, unseen links */
+            /* ── 6. Page cap check ────────────────────────────── */
+            if (visited_count(&cs->visited) >= MAX_PAGES) {
+                log_msg(cs, id,
+                        "[LIMIT] Reached %d-page cap — shutting down.",
+                        MAX_PAGES);
+                cs->shutdown = 1;
+                pthread_cond_broadcast(&cs->work_available);
+                goto update_done;
+            }
+
+            /* ── 7. Enqueue new same-origin, unseen links ──────── */
             int added = 0;
             for (int i = 0; i < link_count; i++) {
+                /* Domain filter: drop links that leave the seed host */
+                if (!same_origin(cs, new_links[i])) continue;
+
                 if (!visited_contains(&cs->visited, new_links[i])) {
                     if (queue_push(&cs->queue, new_links[i])) {
                         added++;
@@ -110,18 +137,17 @@ void *worker_thread(void *arg) {
                 pthread_cond_broadcast(&cs->work_available);
             }
 
-            /* ── 6. Save progress (persist while holding lock) ── */
-            if (save_visited(&cs->visited, SAVE_FILE) == 0) {
-                log_msg(cs, id, "[SAVING] Progress saved to '%s'  "
-                        "(%d visited)", SAVE_FILE,
+            /* ── 8. Save progress ─────────────────────────────── */
+            if (save_visited(&cs->visited,  cs->save_file) == 0) {
+                log_msg(cs, id, "[SAVING] Progress saved (%d visited)",
                         visited_count(&cs->visited));
             }
         }
 
+update_done:
+        /* Decrement AFTER all work is done, then check termination */
         cs->active_threads--;
 
-        /* If we just emptied the queue and no one else is running,
-         * wake everyone so they can detect the done condition.         */
         if (queue_is_empty(&cs->queue) && cs->active_threads == 0) {
             cs->shutdown = 1;
             pthread_cond_broadcast(&cs->work_available);
@@ -129,16 +155,16 @@ void *worker_thread(void *arg) {
 
         pthread_mutex_unlock(&cs->lock);
 
-        /* ── 7. Polite delay (outside lock) ──────────────────── */
-        usleep(FETCH_DELAY_MS * 1000);
+        /* ── 9. Polite delay (outside lock) ───────────────────── */
+        if (!cs->shutdown)
+            usleep(FETCH_DELAY_MS * 1000);
     }
 
     return NULL;
 }
 
-/* ── Entry point used by main to spawn threads ──────────────────── */
+/* ── Entry point used by main to spawn threads ───────────────── */
 
-/* storage for args — one per thread, static lifetime */
 static WorkerArg worker_args[THREAD_COUNT];
 
 void launch_workers(CrawlerState *cs, pthread_t threads[]) {

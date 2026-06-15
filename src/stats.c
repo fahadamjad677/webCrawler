@@ -28,5 +28,5 @@ void print_stats(const CrawlerState *cs) {
     printf("╚══════════╩══════════════╩═════════════╩══════════╝\n");
     printf("\n  Total unique URLs visited: %d\n",
            visited_count(&cs->visited));
-    printf("  Progress saved to: %s\n\n", SAVE_FILE);
+    printf("  Progress saved to: %s\n\n", cs->save_file);
 }
