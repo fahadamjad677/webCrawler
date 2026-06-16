@@ -24,15 +24,11 @@ static void sanitize_name(const char *in, char *out, size_t outlen) {
 }
 
 /* ── Graceful SIGINT handler ──────────────────────────────────── */
+// main.c
 static void handle_sigint(int sig) {
     (void)sig;
-    printf("\n[SYSTEM] Interrupt received — saving state and shutting down...\n");
-
-    pthread_mutex_lock(&g_cs.lock);
-    g_cs.shutdown = 1;
-    save_visited(&g_cs.visited, g_cs.save_file);
-    pthread_cond_broadcast(&g_cs.work_available);
-    pthread_mutex_unlock(&g_cs.lock);
+    printf("\n[SYSTEM] Interrupt — will save and exit after current fetches...\n");
+    atomic_store(&g_cs.sigint_received, 1);
 }
 
 /* ── Ensure a directory path exists (mkdir -p style) ────────────── */
@@ -121,7 +117,7 @@ int main(int argc, char *argv[]) {
     printf("[SYSTEM] Page cap      : %d pages\n\n", MAX_PAGES);
 
     /* ── Resume: load previously visited URLs ──────────────── */
-    int loaded = load_visited(&g_cs.visited, &g_cs.queue, g_cs.save_file);
+int loaded = load_visited(&g_cs.visited, &g_cs.queue, g_cs.data_dir);
     if (loaded > 0) {
         printf("[SYSTEM] Resuming — loaded %d previously visited URLs\n",
                loaded);
@@ -167,7 +163,7 @@ int main(int argc, char *argv[]) {
 
     /* ── Final save ─────────────────────────────────────────── */
     pthread_mutex_lock(&g_cs.lock);
-    save_visited(&g_cs.visited, g_cs.save_file);
+    save_visited(&g_cs.visited, &g_cs.queue, g_cs.data_dir);
     pthread_mutex_unlock(&g_cs.lock);
 
     /* ── Print summary ──────────────────────────────────────── */

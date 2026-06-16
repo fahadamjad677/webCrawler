@@ -9,36 +9,37 @@
  * Uses a temp file + rename for atomic write — no half-written file.
  */
 
-int   save_visited(const VisitedSet *v, const char *path);
-int   load_visited(VisitedSet *v, URLQueue *q, const char *path);
-void  build_data_paths(CrawlerState *cs, const char *seed_url);
 
 
-int save_visited(const VisitedSet *v, const char *path) {
-    /* write to a temp file first */
-    char tmp_path[512];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+int save_visited(const VisitedSet *v, const URLQueue *q, const char *dir) {
+    // --- save visited.txt (existing logic, unchanged) ---
+    char vpath[PATH_LEN], tmp[PATH_LEN];
+    snprintf(vpath, sizeof(vpath), "%s/visited.txt", dir);
+    snprintf(tmp,   sizeof(tmp),   "%s/visited.txt.tmp", dir);
 
-    FILE *fp = fopen(tmp_path, "w");
-    if (!fp) {
-        perror("[SAVE] fopen tmp");
-        return -1;
+    FILE *fp = fopen(tmp, "w");
+    if (!fp) { perror("[SAVE] visited fopen"); return -1; }
+    for (int i = 0; i < VISITED_CAPACITY; i++)
+        if (v->occupied[i]) fprintf(fp, "%s\n", v->table[i]);
+    fflush(fp); fclose(fp);
+    if (rename(tmp, vpath) != 0) { perror("[SAVE] visited rename"); return -1; }
+
+    // --- save queue.txt  (NEW) ---
+    char qpath[PATH_LEN], qtmp[PATH_LEN];
+    snprintf(qpath, sizeof(qpath), "%s/queue.txt", dir);
+    snprintf(qtmp,  sizeof(qtmp),  "%s/queue.txt.tmp", dir);
+
+    FILE *qp = fopen(qtmp, "w");
+    if (!qp) { perror("[SAVE] queue fopen"); return -1; }
+
+    // iterate circular queue without popping
+    int head = q->head;
+    for (int i = 0; i < q->size; i++) {
+        int idx = (head + i) % QUEUE_CAPACITY;
+        fprintf(qp, "%s\n", q->items[idx]);
     }
-
-    for (int i = 0; i < VISITED_CAPACITY; i++) {
-        if (v->occupied[i]) {
-            fprintf(fp, "%s\n", v->table[i]);
-        }
-    }
-
-    fflush(fp);
-    fclose(fp);
-
-    /* atomic rename */
-    if (rename(tmp_path, path) != 0) {
-        perror("[SAVE] rename");
-        return -1;
-    }
+    fflush(qp); fclose(qp);
+    if (rename(qtmp, qpath) != 0) { perror("[SAVE] queue rename"); return -1; }
 
     return 0;
 }
@@ -53,37 +54,41 @@ int save_visited(const VisitedSet *v, const char *path) {
  *
  * Returns number of URLs loaded, -1 on error.
  */
-int load_visited(VisitedSet *v, URLQueue *q, const char *path) {
-    (void)q; /* queue is not re-populated from visited — already crawled */
+int load_visited(VisitedSet *v, URLQueue *q, const char *dir) {
+    char vpath[PATH_LEN], qpath[PATH_LEN];
+    snprintf(vpath, sizeof(vpath), "%s/visited.txt", dir);
+    snprintf(qpath, sizeof(qpath), "%s/queue.txt",   dir);
 
-    struct stat st;
-    if (stat(path, &st) != 0) {
-        if (errno == ENOENT) return 0; /* first run, no file yet */
-        perror("[LOAD] stat");
-        return -1;
-    }
-
-    FILE *fp = fopen(path, "r");
+    // --- load visited.txt ---
+    FILE *fp = fopen(vpath, "r");
     if (!fp) {
-        perror("[LOAD] fopen");
-        return -1;
+        if (errno == ENOENT) return 0;
+        perror("[LOAD] visited"); return -1;
     }
-
     char line[MAX_URL_LEN];
-    int  loaded = 0;
-
+    int loaded = 0;
     while (fgets(line, sizeof(line), fp)) {
-        /* strip newline */
         size_t len = strlen(line);
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
-            line[--len] = '\0';
-
+        while (len > 0 && (line[len-1]=='\n'||line[len-1]=='\r')) line[--len]='\0';
         if (len == 0) continue;
-
         visited_insert(v, line);
         loaded++;
     }
-
     fclose(fp);
+
+    // --- load queue.txt (frontier URLs not yet fetched) ---
+    FILE *qp = fopen(qpath, "r");
+    if (qp) {
+        while (fgets(line, sizeof(line), qp)) {
+            size_t len = strlen(line);
+            while (len > 0 && (line[len-1]=='\n'||line[len-1]=='\r')) line[--len]='\0';
+            if (len == 0) continue;
+            // only re-enqueue if not already visited
+            if (!visited_contains(v, line))
+                queue_push(q, line);
+        }
+        fclose(qp);
+    }
+
     return loaded;
 }

@@ -63,9 +63,9 @@ make
 # some Test Cases
 
 ./crawler https://httpbin.org
-./crawler https://info.cern.ch
 ./crawler https://www.iana.org/help/example-domains
 ./crawler https://neverssl.com
+./crawler https://www.geekybugs.com/
 
 > Note: the first argument's host determines the data folder, e.g.
 > `data/example.com/visited.txt` and `data/example.com/crawler.log`.

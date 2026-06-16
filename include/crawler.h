@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdatomic.h>
 #include <curl/curl.h>
 
 /* ─── tunables ─────────────────────────────────────────────────── */
@@ -17,7 +18,7 @@
 #define DATA_ROOT       "data"
 #define FETCH_DELAY_MS  500     /* polite crawl delay per thread   */
 #define QUEUE_CAPACITY  MAX_URLS
-#define MAX_PAGES       500     /* stop crawl after this many pages */
+#define MAX_PAGES       500    /* stop crawl after this many pages */
 #define PATH_LEN        (MAX_URL_LEN + 64)
 
 /* ─── URL queue (circular, bounded) ────────────────────────────── */
@@ -58,6 +59,7 @@ typedef struct {
     pthread_cond_t  work_available;  /* signaled when queue non-empty */
     int             active_threads;  /* threads currently fetching    */
     int             shutdown;        /* set to 1 to stop all threads  */
+    atomic_int sigint_received;
     ThreadStats     stats[THREAD_COUNT];
     FILE           *logfp;
     char            seed_origin[MAX_URL_LEN]; /* scheme+host of first seed */
@@ -91,8 +93,8 @@ int   extract_links(const char *base_url,
                     char links[][MAX_URL_LEN], int max_links);
 
 /* persistence.c */
-int   save_visited(const VisitedSet *v, const char *path);
-int   load_visited(VisitedSet *v, URLQueue *q, const char *path);
+int save_visited(const VisitedSet *v, const URLQueue *q, const char *dir);
+int load_visited(VisitedSet *v, URLQueue *q, const char *dir);
 
 /* logger.c */
 void  log_msg(CrawlerState *cs, int thread_id, const char *fmt, ...);

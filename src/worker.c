@@ -50,6 +50,18 @@ void *worker_thread(void *arg) {
         /* ── 1. Lock and wait for work ─────────────────────────── */
         pthread_mutex_lock(&cs->lock);
 
+        /* ── SIGINT check: first thread to see the flag saves and shuts down ── */
+        if (atomic_load(&cs->sigint_received)) {
+            if (!cs->shutdown) {
+                save_visited(&cs->visited, &cs->queue, cs->data_dir);
+                log_msg(cs, id, "[SIGINT] State saved — shutting down.");
+                cs->shutdown = 1;
+                pthread_cond_broadcast(&cs->work_available);
+            }
+            atomic_store(&cs->sigint_received, 0);
+        }
+
+        /* ── Wait while queue empty and no shutdown ────────────── */
         while (queue_is_empty(&cs->queue) && !cs->shutdown) {
             if (cs->active_threads == 0) {
                 /* Queue empty, nobody fetching — crawl is complete. */
@@ -58,9 +70,21 @@ void *worker_thread(void *arg) {
                 break;
             }
             pthread_cond_wait(&cs->work_available, &cs->lock);
+
+            /* Re-check SIGINT after waking from cond wait */
+            if (atomic_load(&cs->sigint_received)) {
+                if (!cs->shutdown) {
+                    save_visited(&cs->visited, &cs->queue, cs->data_dir);
+                    log_msg(cs, id, "[SIGINT] State saved — shutting down.");
+                    cs->shutdown = 1;
+                    pthread_cond_broadcast(&cs->work_available);
+                }
+                atomic_store(&cs->sigint_received, 0);
+            }
         }
 
-        if (cs->shutdown && queue_is_empty(&cs->queue)) {
+        /* ── Exit immediately on shutdown ──────────────────────── */
+        if (cs->shutdown) {
             pthread_mutex_unlock(&cs->lock);
             pthread_cond_broadcast(&cs->work_available);
             break;
@@ -113,6 +137,7 @@ void *worker_thread(void *arg) {
                 log_msg(cs, id,
                         "[LIMIT] Reached %d-page cap — shutting down.",
                         MAX_PAGES);
+                save_visited(&cs->visited, &cs->queue, cs->data_dir);
                 cs->shutdown = 1;
                 pthread_cond_broadcast(&cs->work_available);
                 goto update_done;
@@ -137,10 +162,12 @@ void *worker_thread(void *arg) {
                 pthread_cond_broadcast(&cs->work_available);
             }
 
-            /* ── 8. Save progress ─────────────────────────────── */
-            if (save_visited(&cs->visited,  cs->save_file) == 0) {
-                log_msg(cs, id, "[SAVING] Progress saved (%d visited)",
-                        visited_count(&cs->visited));
+            /* ── 8. Save progress (only if not shutting down) ──── */
+            if (!cs->shutdown) {
+                if (save_visited(&cs->visited, &cs->queue, cs->data_dir) == 0) {
+                    log_msg(cs, id, "[SAVING] Progress saved (%d visited)",
+                            visited_count(&cs->visited));
+                }
             }
         }
 
