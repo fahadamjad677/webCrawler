@@ -108,4 +108,7 @@ void  print_stats(const CrawlerState *cs);
 /* main.c (used by worker.c) */
 void launch_workers(CrawlerState *cs, pthread_t threads[]);
 
+
+/* menu.c*/
+void run_menu(CrawlerState *cs, const char *data_dir);
 #endif /* CRAWLER_H */
