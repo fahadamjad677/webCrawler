@@ -14,7 +14,8 @@ SRCS = src/main.c        \
        src/persistence.c \
        src/logger.c      \
        src/worker.c      \
-       src/stats.c
+       src/stats.c       \
+       src/menu.c
 
 OBJS = $(patsubst src/%.c,$(OBJDIR)/%.o,$(SRCS))
 

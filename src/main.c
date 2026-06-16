@@ -169,6 +169,9 @@ int loaded = load_visited(&g_cs.visited, &g_cs.queue, g_cs.data_dir);
     /* ── Print summary ──────────────────────────────────────── */
     print_stats(&g_cs);
 
+    /* ── Interactive search menu ────────────────────────────── */
+    run_menu(&g_cs, g_cs.data_dir);                                
+
     /* ── Cleanup ─────────────────────────────────────────────── */
     pthread_mutex_destroy(&g_cs.lock);
     pthread_cond_destroy(&g_cs.work_available);
