@@ -1,0 +1,5 @@
+# Search queries
+contact
+services
+url:https://example.com
+url:https://news.com/articles
