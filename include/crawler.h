@@ -51,21 +51,25 @@ typedef struct {
     long  errors;
 } ThreadStats;
 
+/* ─── Forward declaration for filter (defined in filter.h) ──────── */
+typedef struct CrawlFilter CrawlFilter;
+
 /* ─── Global crawler state ───────────────────────────────────────── */
 typedef struct {
-    URLQueue       queue;
-    VisitedSet     visited;
+    URLQueue        queue;
+    VisitedSet      visited;
     pthread_mutex_t lock;
     pthread_cond_t  work_available;  /* signaled when queue non-empty */
     int             active_threads;  /* threads currently fetching    */
     int             shutdown;        /* set to 1 to stop all threads  */
-    atomic_int sigint_received;
+    atomic_int      sigint_received;
     ThreadStats     stats[THREAD_COUNT];
     FILE           *logfp;
     char            seed_origin[MAX_URL_LEN]; /* scheme+host of first seed */
-    char            data_dir[PATH_LEN];       /* data/<site>          <-- ADD THIS LINE */
+    char            data_dir[PATH_LEN];
     char            save_file[PATH_LEN];      /* data/<site>/visited.txt */
     char            log_file[PATH_LEN];       /* data/<site>/crawler.log */
+    struct CrawlFilter *filter;               /* active crawl filter      */
 } CrawlerState;
 
 /* ─── Function prototypes ────────────────────────────────────────── */

@@ -1,6 +1,6 @@
 #include "crawler.h"
+#include "filter.h"
 
-/* Argument bundle passed to each worker thread */
 typedef struct {
     CrawlerState *cs;
     int           thread_id;
@@ -8,29 +8,19 @@ typedef struct {
 
 /* ─── Domain filter ───────────────────────────────────────────── */
 
-/*
- * get_origin: copy scheme+host from a URL into out.
- * e.g. "https://example.com/foo/bar" -> "https://example.com"
- */
 static void get_origin(const char *url, char *out, size_t outlen) {
     const char *sep = strstr(url, "://");
-    if (!sep) { strncpy(out, url, outlen - 1); out[outlen-1] = '\0'; return; }
+    if (!sep) { strncpy(out, url, outlen-1); out[outlen-1]='\0'; return; }
     sep += 3;
     const char *slash = strchr(sep, '/');
-    size_t host_len = slash ? (size_t)(slash - url) : strlen(url);
-    size_t copy = host_len < outlen - 1 ? host_len : outlen - 1;
+    size_t host_len = slash ? (size_t)(slash-url) : strlen(url);
+    size_t copy = host_len < outlen-1 ? host_len : outlen-1;
     memcpy(out, url, copy);
     out[copy] = '\0';
 }
 
-/*
- * same_origin: returns 1 if `url` belongs to the same scheme+host
- * as cs->seed_origin, 0 otherwise.
- *
- * This is the primary mechanism that keeps the crawl finite.
- */
 static int same_origin(const CrawlerState *cs, const char *url) {
-    if (cs->seed_origin[0] == '\0') return 1; /* no filter — allow all */
+    if (cs->seed_origin[0] == '\0') return 1;
     char url_origin[MAX_URL_LEN];
     get_origin(url, url_origin, sizeof(url_origin));
     return strcmp(cs->seed_origin, url_origin) == 0;
@@ -50,7 +40,7 @@ void *worker_thread(void *arg) {
         /* ── 1. Lock and wait for work ─────────────────────────── */
         pthread_mutex_lock(&cs->lock);
 
-        /* ── SIGINT check: first thread to see the flag saves and shuts down ── */
+        /* ── SIGINT check ──────────────────────────────────────── */
         if (atomic_load(&cs->sigint_received)) {
             if (!cs->shutdown) {
                 save_visited(&cs->visited, &cs->queue, cs->data_dir);
@@ -64,14 +54,12 @@ void *worker_thread(void *arg) {
         /* ── Wait while queue empty and no shutdown ────────────── */
         while (queue_is_empty(&cs->queue) && !cs->shutdown) {
             if (cs->active_threads == 0) {
-                /* Queue empty, nobody fetching — crawl is complete. */
                 cs->shutdown = 1;
                 pthread_cond_broadcast(&cs->work_available);
                 break;
             }
             pthread_cond_wait(&cs->work_available, &cs->lock);
 
-            /* Re-check SIGINT after waking from cond wait */
             if (atomic_load(&cs->sigint_received)) {
                 if (!cs->shutdown) {
                     save_visited(&cs->visited, &cs->queue, cs->data_dir);
@@ -83,7 +71,6 @@ void *worker_thread(void *arg) {
             }
         }
 
-        /* ── Exit immediately on shutdown ──────────────────────── */
         if (cs->shutdown) {
             pthread_mutex_unlock(&cs->lock);
             pthread_cond_broadcast(&cs->work_available);
@@ -96,8 +83,15 @@ void *worker_thread(void *arg) {
             continue;
         }
 
-        /* Skip if already visited (duplicate in queue) */
+        /* Skip if already visited */
         if (visited_contains(&cs->visited, url)) {
+            pthread_mutex_unlock(&cs->lock);
+            continue;
+        }
+
+        /* ── FILTER CHECK — skip URLs that don't match ─────────── */
+        if (cs->filter && !filter_matches(cs->filter, url)) {
+            log_msg(cs, id, "Skipped   --- %s  [filter]", url);
             pthread_mutex_unlock(&cs->lock);
             continue;
         }
@@ -135,19 +129,22 @@ void *worker_thread(void *arg) {
             /* ── 6. Page cap check ────────────────────────────── */
             if (visited_count(&cs->visited) >= MAX_PAGES) {
                 log_msg(cs, id,
-                        "[LIMIT] Reached %d-page cap — shutting down.",
-                        MAX_PAGES);
+                        "[LIMIT] Reached %d-page cap — shutting down.", MAX_PAGES);
                 save_visited(&cs->visited, &cs->queue, cs->data_dir);
                 cs->shutdown = 1;
                 pthread_cond_broadcast(&cs->work_available);
                 goto update_done;
             }
 
-            /* ── 7. Enqueue new same-origin, unseen links ──────── */
+            /* ── 7. Enqueue new links — domain + filter check ──── */
             int added = 0;
             for (int i = 0; i < link_count; i++) {
-                /* Domain filter: drop links that leave the seed host */
+                /* domain filter: stay on seed host */
                 if (!same_origin(cs, new_links[i])) continue;
+
+                /* crawl filter: only enqueue matching URLs */
+                if (cs->filter && !filter_matches(cs->filter, new_links[i]))
+                    continue;
 
                 if (!visited_contains(&cs->visited, new_links[i])) {
                     if (queue_push(&cs->queue, new_links[i])) {
@@ -162,7 +159,7 @@ void *worker_thread(void *arg) {
                 pthread_cond_broadcast(&cs->work_available);
             }
 
-            /* ── 8. Save progress (only if not shutting down) ──── */
+            /* ── 8. Save progress ─────────────────────────────── */
             if (!cs->shutdown) {
                 if (save_visited(&cs->visited, &cs->queue, cs->data_dir) == 0) {
                     log_msg(cs, id, "[SAVING] Progress saved (%d visited)",
@@ -172,7 +169,6 @@ void *worker_thread(void *arg) {
         }
 
 update_done:
-        /* Decrement AFTER all work is done, then check termination */
         cs->active_threads--;
 
         if (queue_is_empty(&cs->queue) && cs->active_threads == 0) {
@@ -182,7 +178,7 @@ update_done:
 
         pthread_mutex_unlock(&cs->lock);
 
-        /* ── 9. Polite delay (outside lock) ───────────────────── */
+        /* ── 9. Polite delay ──────────────────────────────────── */
         if (!cs->shutdown)
             usleep(FETCH_DELAY_MS * 1000);
     }
